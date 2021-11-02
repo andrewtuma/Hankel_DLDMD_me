@@ -10,7 +10,6 @@ import numpy as np
 import tensorflow as tf
 import HelperFuns as hf
 
-
 def train_model(hyp_params, train_data, val_set, model, loss):
     # Dictionary to store all relevant training parameters and losses
     train_params = dict()
@@ -18,13 +17,16 @@ def train_model(hyp_params, train_data, val_set, model, loss):
     train_params['train_loss_results'] = []
     train_params['val_loss_results'] = []
     train_params['val_loss_comps_avgs'] = []
-
+    Step = 1
+    total = -2
+    total_steps = [total]
+    original_window = model.window
     for epoch in range(1, hyp_params['max_epochs'] + 1):
         epoch_start_time = dt.datetime.now()
         epoch_time = time.time()
         epoch_loss_avg_train = tf.keras.metrics.Mean()
         epoch_loss_avg_val = tf.keras.metrics.Mean()
-
+        epoch_steps = []
         # Shuffle, batch, and prefetch training data to the GPU
         train_set = train_data.shuffle(hyp_params['num_train_init_conds']) \
             .batch(hyp_params['batch_size'], drop_remainder=True)
@@ -52,14 +54,49 @@ def train_model(hyp_params, train_data, val_set, model, loss):
             lrecon = tf.keras.metrics.Mean()
             lpred = tf.keras.metrics.Mean()
             ldmd = tf.keras.metrics.Mean()
+
             for val_batch in val_set:
-                val_pred = model(val_batch)
-                val_loss = loss(val_pred, val_batch)
+                range_list = []
+                if model.window + Step >= model.num_pred_steps:
+                    range_list = [-Step, 0]
+                    val_loss2 = 10000000000
+                elif model.window - Step <= model.num_pred_steps - 80:
+                    range_list = [0, Step]
+                    val_loss0 = 10000000000
+                else:
+                    range_list = [-Step, 0, Step]
+
+                for i in range_list:
+                    model.window = original_window + i
+                    if i==-Step:
+                        val_pred0 = model(val_batch)
+                        val_loss0 = loss(val_pred0, val_batch)
+                    elif i==0:
+                        val_pred1 = model(val_batch)
+                        val_loss1 = loss(val_pred1, val_batch)
+                    elif i==Step:
+                        val_pred2 = model(val_batch)
+                        val_loss2 = loss(val_pred2, val_batch)
+
+                if val_loss0 < val_loss1 and val_loss0 < val_loss2:
+                    val_pred = val_pred0
+                    val_loss = val_loss0
+                    epoch_steps.append(-Step)
+                elif val_loss1 < val_loss0 and val_loss1 < val_loss2:
+                    val_pred = val_pred1
+                    val_loss = val_loss1
+                    epoch_steps.append(0)
+                elif val_loss2 < val_loss0 and val_loss2 < val_loss1:
+                    val_pred = val_pred2
+                    val_loss = val_loss2
+                    epoch_steps.append(Step) 
+
                 epoch_loss_avg_val.update_state(val_loss)
                 # Save loss components for diagnostic plotting
                 lrecon.update_state(np.log10(loss.loss_recon))
                 lpred.update_state(np.log10(loss.loss_pred))
                 ldmd.update_state(np.log10(loss.loss_dmd))
+
             train_params['val_loss_comps_avgs'].append([lrecon.result(), lpred.result(), ldmd.result()])
 
         # Report training status
@@ -71,7 +108,14 @@ def train_model(hyp_params, train_data, val_set, model, loss):
                       test=train_params['val_loss_results'][-1],
                       lr=hyp_params['lr'],
                       time=time.time() - epoch_time))
-
+        #print(epoch_steps)
+        mode = max(set(epoch_steps), key=epoch_steps.count)
+        print("The most common window shift was: ", mode)
+        original_window = original_window + mode
+        print("New window size for the next epoch: ", original_window)
+        total = total + mode
+        total_steps.append(total)        
+        
         # Save training diagnostic plots
         if epoch == 1 or epoch % hyp_params['plot_every'] == 0:
             if not os.path.exists(hyp_params['plot_path']):
@@ -93,7 +137,9 @@ def train_model(hyp_params, train_data, val_set, model, loss):
     print("\nTotal training time: %4.2f minutes" % ((time.time() - train_params['start_time']) / 60.0))
     print("Final train loss: %2.7f" % (train_params['train_loss_results'][-1]))
     print("Final validation loss: %2.7f" % (train_params['val_loss_results'][-1]))
-
+    print("here are the delay steps taken: ")
+    print(total_steps)
+    hf.net_steps_plot(total_steps)
     results = dict()
     results['model'] = model
     results['loss'] = loss
